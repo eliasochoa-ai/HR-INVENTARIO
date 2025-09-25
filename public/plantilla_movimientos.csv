@@ -1,0 +1,3 @@
+Fecha;Tipo;Cliente;Producto;Cantidad;Unidad;Guía Remitente;Guía Transportista;Contenedor;DUA;Chofer;Tracto;Obs;Código
+2025-01-05;ING;PROCOMSAC;Saco 25 kg;100;saco;GR-001;GT-888;CONT-001;DUA-123;Juan Perez;ABC-123;Ingreso inicial;SACO25
+2025-01-07;EGR;PROCOMSAC;Saco 25 kg;30;saco;GR-002;GT-777;CONT-001;DUA-124;Luis Rojas;XYZ-999;Despacho orden 10;SACO25

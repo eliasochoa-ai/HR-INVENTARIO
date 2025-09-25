@@ -24,7 +24,7 @@ function toCSV(rows, headers) {
   const esc = (v) => {
     if (v == null) return "";
     const s = String(v).replaceAll("\n", " ");
-    if (/[\",;\n]/.test(s)) return '"' + s.replaceAll('"', '""') + '"';
+    if (/[\\\",;\\n]/.test(s)) return '"' + s.replaceAll('"', '""') + '"';
     return s;
   };
   const head = headers.map((h) => esc(h.label)).join(";");
@@ -41,6 +41,148 @@ function download(filename, text) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+/* ======= 1) Validación de stock ======= */
+function saldoActual(store, clienteId, productoId) {
+  return store.movimientos.reduce((acc, m) => {
+    if (m.clienteId === clienteId && m.productoId === productoId) {
+      return acc + (m.tipo === "ING" ? Number(m.cantidad) : -Number(m.cantidad));
+    }
+    return acc;
+  }, 0);
+}
+
+/* ======= 2) Importar CSV ======= */
+const norm = (s) => (s || "").toString().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+function parseCSVLine(line, sep) {
+  let out = [], cur = "", inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQ && line[i + 1] === '"') { cur += '"'; i++; }
+      else { inQ = !inQ; }
+    } else if (ch === sep && !inQ) {
+      out.push(cur); cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+async function importarMovimientosDesdeCSV(file, store, setStore) {
+  if (!file) return;
+  const text = await file.text();
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) { alert("CSV vacío."); return; }
+
+  const sep = lines[0].includes(";") ? ";" : ",";
+  const headersRaw = parseCSVLine(lines[0], sep);
+  const headers = headersRaw.map((h) => norm(h));
+
+  const findIdx = (names) => headers.findIndex((h) => names.some((n) => h === norm(n) || h.startsWith(norm(n))));
+  const ix = {
+    fecha: findIdx(["fecha","date"]),
+    tipo: findIdx(["tipo","type"]),
+    cliente: findIdx(["cliente","client"]),
+    producto: findIdx(["producto","product"]),
+    cantidad: findIdx(["cantidad","qty","cantidad (und)"]),
+    guiaRemitente: findIdx(["guia remitente","guía remitente"]),
+    guiaTransportista: findIdx(["guia transportista","guía transportista"]),
+    contenedor: findIdx(["contenedor","container"]),
+    dua: findIdx(["dua"]),
+    chofer: findIdx(["chofer","driver"]),
+    tracto: findIdx(["tracto","plate","placa"]),
+    obs: findIdx(["obs","observaciones","observacion","observación","notes"]),
+    codigo: findIdx(["codigo","código","code"]),
+    unidad: findIdx(["unidad","unit"]),
+  };
+
+  setStore((prev) => {
+    const clientes = [...prev.clientes];
+    const productos = [...prev.productos];
+    const getClienteId = (nombre) => {
+      if (!nombre) return "";
+      const n = String(nombre).trim();
+      let c = clientes.find(x => norm(x.nombre) === norm(n));
+      if (!c) { c = { id: uid(), nombre: n, ruc: "" }; clientes.push(c); }
+      return c.id;
+    };
+    const getProductoId = (nombre, codigo, unidad) => {
+      const n = String(nombre || "").trim();
+      const cod = String(codigo || "").trim();
+      let p = productos.find(x => (cod && norm(x.codigo) === norm(cod)) || (n && norm(x.nombre) === norm(n)));
+      if (!p) {
+        p = { id: uid(), codigo: cod, nombre: n || cod || "Producto", unidad: unidad || "unidad" };
+        productos.push(p);
+      }
+      return p.id;
+    };
+
+    const nuevos = [];
+    for (let i = 1; i < lines.length; i++) {
+      const cols = parseCSVLine(lines[i], sep);
+      const tipo = ((ix.tipo>=0? cols[ix.tipo] : "") || "").toUpperCase().includes("EGR") ? "EGR" : "ING";
+      const fecha = ((ix.fecha>=0? cols[ix.fecha] : "") || todayISO()).slice(0, 10);
+      const clienteNombre = ix.cliente>=0 ? cols[ix.cliente] : "";
+      const productoNombre = ix.producto>=0 ? cols[ix.producto] : "";
+      const codigo = ix.codigo>=0 ? cols[ix.codigo] : "";
+      const unidad = ix.unidad>=0 ? cols[ix.unidad] : "";
+      const cantidad = Number(ix.cantidad>=0 ? cols[ix.cantidad] : "0") || 0;
+
+      const clienteId = getClienteId(clienteNombre);
+      const productoId = getProductoId(productoNombre, codigo, unidad);
+
+      if (tipo === "EGR") {
+        const saldo = prev.movimientos.concat(nuevos).reduce((acc, m) => {
+          if (m.clienteId === clienteId && m.productoId === productoId) {
+            return acc + (m.tipo === "ING" ? Number(m.cantidad) : -Number(m.cantidad));
+          }
+          return acc;
+        }, 0);
+        if (cantidad > saldo) { console.warn("Fila", i + 1, "sin stock suficiente. Se omitió."); continue; }
+      }
+
+      nuevos.push({
+        id: uid(), fecha, tipo, clienteId, productoId, cantidad,
+        guiaRemitente: ix.guiaRemitente>=0 ? cols[ix.guiaRemitente] : "",
+        guiaTransportista: ix.guiaTransportista>=0 ? cols[ix.guiaTransportista] : "",
+        contenedor: ix.contenedor>=0 ? cols[ix.contenedor] : "",
+        dua: ix.dua>=0 ? cols[ix.dua] : "",
+        chofer: ix.chofer>=0 ? cols[ix.chofer] : "",
+        tracto: ix.tracto>=0 ? cols[ix.tracto] : "",
+        observaciones: ix.obs>=0 ? cols[ix.obs] : "",
+      });
+    }
+
+    alert(`Importados ${nuevos.length} movimientos`);
+    return { ...prev, clientes, productos, movimientos: [...nuevos, ...prev.movimientos] };
+  });
+}
+
+/* ======= 3) Backup / Restore ======= */
+function exportarJSON(store) {
+  const blob = new Blob([JSON.stringify(store, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `backup_inventario_${todayISO()}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+async function importarJSON(file, setStore) {
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    if (!data || !Array.isArray(data.movimientos)) throw new Error("Formato inválido");
+    setStore(data);
+    alert("Backup restaurado correctamente");
+  } catch (e) {
+    console.error(e);
+    alert("No se pudo importar el backup");
+  }
 }
 
 // UI atoms
@@ -212,16 +354,24 @@ export default function App() {
     return { ingresosMes, egresosMes, viajesMes, stockTotal };
   }, [store.movimientos, saldos]);
 
+  /* ======= Acciones ======= */
   function agregarMovimiento() {
     if (!movForm.clienteId || !movForm.productoId || !movForm.cantidad) {
       alert("Completa cliente, producto y cantidad");
       return;
     }
-    if (Number(movForm.cantidad) <= 0) {
-      alert("La cantidad debe ser mayor a 0");
-      return;
+    const qty = Number(movForm.cantidad);
+    if (qty <= 0) { alert("La cantidad debe ser mayor a 0"); return; }
+
+    if (movForm.tipo === "EGR") {
+      const saldo = saldoActual(store, movForm.clienteId, movForm.productoId);
+      if (qty > saldo) {
+        alert(`No hay stock suficiente. Saldo actual: ${saldo}`);
+        return;
+      }
     }
-    const nuevo = { id: uid(), ...movForm, cantidad: Number(movForm.cantidad) };
+
+    const nuevo = { id: uid(), ...movForm, cantidad: qty };
     setStore((s) => ({ ...s, movimientos: [nuevo, ...s.movimientos] }));
     setMovForm({
       fecha: todayISO(),
@@ -343,6 +493,14 @@ export default function App() {
           <Button onClick={() => setTab("productos")}>Productos</Button>
           <Button onClick={() => setTab("clientes")}>Clientes</Button>
           <Button onClick={() => setTab("reportes")}>Reportes</Button>
+          <Button onClick={exportarSaldos}>Exportar saldos</Button>
+          {/* Backup / Restore */}
+          <Button onClick={() => exportarJSON(store)}>Backup JSON</Button>
+          <label className="cursor-pointer">
+            <input type="file" accept="application/json" className="hidden"
+              onChange={(e) => importarJSON(e.target.files?.[0], setStore)} />
+            <span className="rounded-xl px-3 py-2 border border-gray-300 bg-gray-50 hover:bg-gray-100">Restaurar JSON</span>
+          </label>
           <Button className="ml-auto" onClick={resetearDatos}>⚠️ Resetear datos</Button>
         </div>
       </Card>
@@ -351,7 +509,23 @@ export default function App() {
 
   const Movimientos = () => (
     <div className="flex flex-col gap-3">
-      <Card title="Filtros" footer={<Button onClick={exportarMovimientos}>Exportar CSV</Button>}>
+      <Card title="Filtros" footer={
+        <div className="flex gap-2 items-center">
+          <Button onClick={exportarMovimientos}>Exportar CSV</Button>
+          {/* Importar CSV */}
+          <label className="cursor-pointer">
+            <input
+              type="file"
+              accept=".csv"
+              className="hidden"
+              onChange={(e) => importarMovimientosDesdeCSV(e.target.files?.[0], store, setStore)}
+            />
+            <span className="rounded-xl px-3 py-2 border border-gray-300 bg-gray-50 hover:bg-gray-100">
+              Importar CSV
+            </span>
+          </label>
+        </div>
+      }>
         <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
           <Select label="Cliente" value={filtros.clienteId} onChange={(e) => setFiltros({ ...filtros, clienteId: e.target.value })}>
             <option value="">Todos</option>
@@ -391,7 +565,7 @@ export default function App() {
               {movimientosFiltrados.map((m) => (
                 <tr key={m.id} className="odd:bg-white even:bg-gray-50">
                   <td className="px-2 py-2 border-b">{m.fecha}</td>
-                  <td className="px-2 py-2 border-b">{m.tipo === "ING" ? <Chip>ING</Chip> : <Chip>EG R</Chip>}</td>
+                  <td className="px-2 py-2 border-b">{m.tipo === "ING" ? <Chip>ING</Chip> : <Chip>EGR</Chip>}</td>
                   <td className="px-2 py-2 border-b whitespace-nowrap">{clientesById[m.clienteId]?.nombre || "—"}</td>
                   <td className="px-2 py-2 border-b whitespace-nowrap">{productosById[m.productoId]?.nombre || "—"}</td>
                   <td className="px-2 py-2 border-b text-right">{m.cantidad}</td>
